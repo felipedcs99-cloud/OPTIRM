@@ -4,7 +4,6 @@ from utils import inicializar_estado
 from mapa import fragmento_mapa
 from panel import barra_lateral, panel_control
 
-# Configuración de página
 st.set_page_config(
     page_title="Optimización Logística RM Zona Sur",
     page_icon="🚚",
@@ -12,16 +11,12 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Inicializar todo el estado de la sesión
 inicializar_estado()
 
-# Título principal
 st.title("Optimización Logística — Región Metropolitana (Zona Sur)")
 
-# Mostrar barra lateral (carga, flota, exportación)
 barra_lateral()
 
-# Si no hay pedidos, mostrar mensaje informativo
 if st.session_state.df_pedidos.empty:
     st.info(
         "👋 Comienza cargando un archivo de pedidos (.xlsx o .csv) desde la "
@@ -29,7 +24,6 @@ if st.session_state.df_pedidos.empty:
         "id_pedido, cliente, lat, lon, direccion, peso_kg, codigo_transporte_sap."
     )
 
-# Layout principal: mapa + panel derecho
 col_mapa, col_panel = st.columns([2.2, 1])
 
 with col_mapa:
