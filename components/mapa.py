@@ -5,12 +5,6 @@ from folium.plugins import Draw
 from streamlit_folium import st_folium
 from shapely.geometry import shape, Point
 
-def rerun_app():
-    try:
-        st.rerun(scope="app")
-    except TypeError:
-        st.rerun()
-
 def construir_mapa():
     m = folium.Map(
         location=st.session_state.mapa_center,
@@ -74,6 +68,7 @@ def construir_mapa():
 
     capa_pedidos.add_to(m)
 
+    # Mantener visualmente las figuras dibujadas previamente
     for geometria in st.session_state.geometrias_dibujadas:
         try:
             folium.GeoJson(
@@ -102,33 +97,14 @@ def obtener_ids_dentro_de_geometrias(geometrias):
                 ids_dentro.add(fila["id_pedido"])
     return list(ids_dentro)
 
-def aplicar_seleccion_por_dibujos(dibujos_actuales):
-    ids_en_figuras = set(obtener_ids_dentro_de_geometrias(dibujos_actuales))
-    seleccion_actual = set(st.session_state.pedidos_seleccionados)
-
-    if st.session_state.modo_seleccion.startswith("Agregar"):
-        nueva_seleccion = seleccion_actual | ids_en_figuras
-    else:
-        nueva_seleccion = ids_en_figuras
-
-    st.session_state.pedidos_seleccionados = sorted(nueva_seleccion)
-
-def alternar_seleccion_pedido(id_pedido):
-    seleccion_actual = set(st.session_state.pedidos_seleccionados)
-    if id_pedido in seleccion_actual:
-        seleccion_actual.discard(id_pedido)
-    else:
-        seleccion_actual.add(id_pedido)
-    st.session_state.pedidos_seleccionados = sorted(seleccion_actual)
-
 @st.fragment
 def fragmento_mapa():
-    st.subheader("🗺️ Mapa de Pedidos")
+    st.subheader("🗺️ Mapa de Pedidos (Estable)")
 
     col_modo, col_info = st.columns([1.3, 1])
     with col_modo:
         st.radio(
-            "Modo de selección al dibujar",
+            "Modo de selección al procesar figuras",
             options=["Agregar a la selección", "Reemplazar selección"],
             key="modo_seleccion",
             horizontal=True,
@@ -138,42 +114,43 @@ def fragmento_mapa():
 
     mapa = construir_mapa()
 
+    # Renderizamos el mapa de forma completamente fluida y sin bucles de recarga
     salida_mapa = st_folium(
         mapa,
         width="100%",
-        height=620,
+        height=580,
         key="mapa_principal",
-        returned_objects=[
-            "last_active_drawing",
-            "all_drawings",
-            "center",
-            "zoom",
-            "last_object_clicked_tooltip",
-        ],
+        returned_objects=["all_drawings", "center", "zoom"],
     )
 
+    # Guardamos silenciosamente la posición y el zoom actual del usuario
     if salida_mapa.get("center"):
         st.session_state.mapa_center = [salida_mapa["center"]["lat"], salida_mapa["center"]["lng"]]
     if salida_mapa.get("zoom"):
         st.session_state.mapa_zoom = salida_mapa["zoom"]
 
-    dibujos_actuales = salida_mapa.get("all_drawings") or []
-    if dibujos_actuales and dibujos_actuales != st.session_state.geometrias_dibujadas:
-        st.session_state.geometrias_dibujadas = dibujos_actuales
-        aplicar_seleccion_por_dibujos(dibujos_actuales)
-        rerun_app()
+    # Botones de control manual (Bajo Demanda)
+    col_b1, col_b2 = st.columns(2)
+    with col_b1:
+        if st.button("🔍 Procesar pedidos dentro de las figuras", use_container_width=True, type="primary"):
+            dibujos = salida_mapa.get("all_drawings") or []
+            st.session_state.geometrias_dibujadas = dibujos
+            ids_en_figuras = obtener_ids_dentro_de_geometrias(dibujos)
 
-    tooltip_clickeado = salida_mapa.get("last_object_clicked_tooltip")
-    if tooltip_clickeado and tooltip_clickeado != st.session_state.ultimo_click_procesado:
-        st.session_state.ultimo_click_procesado = tooltip_clickeado
-        if tooltip_clickeado in set(st.session_state.df_pedidos["id_pedido"]):
-            alternar_seleccion_pedido(tooltip_clickeado)
-            rerun_app()
+            seleccion_actual = set(st.session_state.pedidos_seleccionados)
+            if st.session_state.modo_seleccion.startswith("Agregar"):
+                nueva_seleccion = seleccion_actual | set(ids_en_figuras)
+            else:
+                nueva_seleccion = set(ids_en_figuras)
 
-    if st.button("🧹 Limpiar selección y figuras", use_container_width=True):
-        st.session_state.pedidos_seleccionados = []
-        st.session_state.geometrias_dibujadas = []
-        st.session_state.ultimo_click_procesado = None
-        rerun_app()
+            st.session_state.pedidos_seleccionados = sorted(nueva_seleccion)
+            st.success(f"¡Se seleccionaron {len(ids_en_figuras)} pedidos de las figuras!")
+            st.rerun()
 
-    st.caption("🟡 Seleccionado · 🟢 Asignado o pre-cargado en vehículo · ⚪ Sin asignar.")
+    with col_b2:
+        if st.button("🧹 Limpiar selección y figuras", use_container_width=True):
+            st.session_state.pedidos_seleccionados = []
+            st.session_state.geometrias_dibujadas = []
+            st.rerun()
+
+    st.caption("💡 Mueve, arrastra o haz zoom con total libertad. Dibuja formas y haz clic en 'Procesar pedidos' para seleccionarlos.")
