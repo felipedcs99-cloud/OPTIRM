@@ -3,7 +3,7 @@ import json
 import hashlib
 import streamlit as st
 import folium
-from folium.plugins import Draw, MarkerCluster
+from folium.plugins import Draw
 from streamlit_folium import st_folium
 from utils import (
     actualizar_seleccion_por_figuras,
@@ -14,7 +14,7 @@ from utils import (
 )
 
 def construir_mapa():
-    """Construye el mapa Folium con capas, marcadores y Draw."""
+    """Construye el mapa con marcadores individuales (sin clustering)."""
     m = folium.Map(
         location=st.session_state.mapa_center,
         zoom_start=st.session_state.mapa_zoom,
@@ -22,7 +22,7 @@ def construir_mapa():
         control_scale=True,
     )
 
-    # Capa de comunas (cacheada)
+    # Capa de comunas (si existe)
     if st.session_state.geojson_comunas is not None:
         geojson_data = st.session_state.geojson_comunas
         primeras_props = geojson_data.get("features", [{}])[0].get("properties", {})
@@ -54,17 +54,12 @@ def construir_mapa():
         edit_options={"edit": True, "remove": True},
     ).add_to(m)
 
-    # Marcadores de pedidos (con clustering opcional)
+    # Marcadores de pedidos (cada punto independiente)
     df = st.session_state.df_pedidos
     asignaciones = st.session_state.asignaciones
     seleccion_total = set(st.session_state.pedidos_seleccionados)
 
-    # Usamos MarkerCluster si hay muchos pedidos (>200)
-    usar_cluster = len(df) > 200
-    if usar_cluster:
-        cluster = MarkerCluster(name="Pedidos").add_to(m)
-    else:
-        capa_pedidos = folium.FeatureGroup(name="Pedidos")
+    capa_pedidos = folium.FeatureGroup(name="Pedidos")
 
     for _, fila in df.iterrows():
         pid = fila["id_pedido"]
@@ -72,11 +67,11 @@ def construir_mapa():
         es_seleccionado = pid in seleccion_total
 
         if es_seleccionado:
-            color = "#F1C40F"
+            color = "#F1C40F"  # amarillo
         elif asignado:
-            color = "#27AE60"
+            color = "#27AE60"  # verde
         else:
-            color = "#7F8C8D"
+            color = "#7F8C8D"  # gris
 
         popup_html = (
             f"<b>Pedido:</b> {pid}<br>"
@@ -97,18 +92,13 @@ def construir_mapa():
             fill_opacity=0.9,
             weight=2,
             popup=folium.Popup(popup_html, max_width=280),
-            tooltip=pid,
+            tooltip=pid,  # el tooltip es el id_pedido
         )
+        capa_pedidos.add_child(marker)
 
-        if usar_cluster:
-            cluster.add_child(marker)
-        else:
-            capa_pedidos.add_child(marker)
+    capa_pedidos.add_to(m)
 
-    if not usar_cluster:
-        capa_pedidos.add_to(m)
-
-    # Redibujar geometrías guardadas
+    # Redibujar figuras guardadas
     for geometria in st.session_state.geometrias_dibujadas:
         try:
             folium.GeoJson(
@@ -124,10 +114,6 @@ def construir_mapa():
 
     folium.LayerControl(collapsed=True).add_to(m)
     return m
-
-# ============================================================================
-# FRAGMENTO DEL MAPA (con manejo optimizado de reruns)
-# ============================================================================
 
 @st.fragment
 def fragmento_mapa():
@@ -161,7 +147,7 @@ def fragmento_mapa():
         ],
     )
 
-    # Persistir centro y zoom
+    # Actualizar centro y zoom (siempre, pero sin disparar rerun)
     if salida_mapa.get("center"):
         st.session_state.mapa_center = [
             salida_mapa["center"]["lat"],
