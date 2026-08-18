@@ -3,7 +3,6 @@ import pandas as pd
 import folium
 from streamlit_folium import st_folium
 from folium.plugins import Draw
-from shapely.geometry import Point, Polygon
 
 # Configuración de la página en ancho completo
 st.set_page_config(layout="wide", page_title="Optimizador Logístico RM - Selección Avanzada")
@@ -27,6 +26,24 @@ COLORES_TRANSPORTE = {
     "TR-12": "#9A6324"   # Marrón
 }
 
+# Función matemática pura para detectar si un punto (lon, lat) está dentro de un polígono
+def punto_en_poligono(lon, lat, poly_coords):
+    x, y = lon, lat
+    inside = False
+    n = len(poly_coords)
+    p1x, p1y = poly_coords[0]
+    for i in range(n + 1):
+        p2x, p2y = poly_coords[i % n]
+        if y > min(p1y, p2y):
+            if y <= max(p1y, p2y):
+                if x <= max(p1x, p2x):
+                    if p1y != p2y:
+                        xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                    if p1x == p2x or x <= xinters:
+                        inside = not inside
+        p1x, p1y = p2x, p2y
+    return inside
+
 # Carga de archivo CSV
 uploaded_file = st.file_uploader("Sube tu archivo CSV (Estructura: id_pedido, cliente, direccion, lat, lon, codigo_transporte_sap)", type="csv")
 
@@ -43,7 +60,6 @@ if uploaded_file is not None:
         if 'puntos_seleccionados' not in st.session_state:
             st.session_state['puntos_seleccionados'] = set()
 
-        # Para evitar procesar el mismo dibujo varias veces al refrescar
         if 'last_drawing_sig' not in st.session_state:
             st.session_state['last_drawing_sig'] = None
 
@@ -60,12 +76,8 @@ if uploaded_file is not None:
                 pid = row['id_pedido']
                 transporte_actual = st.session_state['asignaciones'].get(pid, row['codigo_transporte_sap'])
                 
-                # Definir color del marcador:
-                # Si está seleccionado (en proceso), se muestra en Naranja brillante o Negro temporal.
-                # Si ya fue asignado a un transporte, usa el color único de ese transporte.
-                # Si es original sin tocar, usa un gris/azul base.
                 if pid in st.session_state['puntos_seleccionados']:
-                    color_marker = "#FF4500" # Naranja rojizo brillante para indicar selección activa
+                    color_marker = "#FF4500" # Naranja rojizo brillante para selección activa
                     fill_opacity = 1.0
                     radius = 8
                 elif transporte_actual in COLORES_TRANSPORTE:
@@ -73,7 +85,7 @@ if uploaded_file is not None:
                     fill_opacity = 0.8
                     radius = 6
                 else:
-                    color_marker = "#1f77b4" # Color por defecto
+                    color_marker = "#1f77b4"
                     fill_opacity = 0.6
                     radius = 6
 
@@ -90,7 +102,7 @@ if uploaded_file is not None:
                     popup=f"<b>{row['cliente']}</b><br>ID: {pid}<br>Dir: {row['direccion']}<br>Transp. Actual: {transporte_actual}"
                 ).add_to(m)
 
-            # Herramientas de dibujo (Polígonos, Rectángulos, Círculos)
+            # Herramientas de dibujo
             draw = Draw(
                 export=False,
                 draw_options={
@@ -104,50 +116,40 @@ if uploaded_file is not None:
             )
             draw.add_to(m)
 
-            # Capturar interacciones del mapa
             map_output = st_folium(m, width=700, height=550, returned_objects=["last_object_clicked", "last_active_drawing"])
 
         with col2:
             st.subheader("Panel de Reasignación")
             
-            # 1. Procesar clic individual (acumulativo)
+            # 1. Clic individual
             if map_output and map_output.get('last_object_clicked'):
                 clicked_tooltip = map_output['last_object_clicked'].get('tooltip')
                 if clicked_tooltip and "ID: " in clicked_tooltip:
                     clicked_id = clicked_tooltip.split(" | ")[0].replace("ID: ", "").strip()
-                    
-                    # Alternar selección individual
                     if clicked_id in st.session_state['puntos_seleccionados']:
                         st.session_state['puntos_seleccionados'].remove(clicked_id)
                     else:
                         st.session_state['puntos_seleccionados'].add(clicked_id)
                     st.rerun()
 
-            # 2. Procesar figuras geométricas dibujadas (acumulativo)
+            # 2. Figuras dibujadas
             if map_output and map_output.get('last_active_drawing'):
                 drawing = map_output['last_active_drawing']
-                drawing_str = str(drawing) # Firma para evitar bucles infinitos
+                drawing_str = str(drawing)
                 
                 if drawing_str != st.session_state['last_drawing_sig']:
                     st.session_state['last_drawing_sig'] = drawing_str
                     geom_type = drawing['geometry']['type']
                     coords = drawing['geometry']['coordinates']
 
-                    nuevos_capturados = 0
                     if geom_type == 'Polygon':
-                        polygon = Polygon(coords[0])
+                        poly_coords = coords[0] # Lista de [lon, lat]
                         for _, row in df.iterrows():
-                            if polygon.contains(Point(row['lon'], row['lat'])):
+                            if punto_en_poligono(row['lon'], row['lat'], poly_coords):
                                 if row['id_pedido'] not in st.session_state['puntos_seleccionados']:
                                     st.session_state['puntos_seleccionados'].add(row['id_pedido'])
-                                    nuevos_capturados += 1
                         st.rerun()
-                    elif geom_type == 'Point':
-                        # Para círculos dibujados en Leaflet.draw, el centro es un Point y el radio viene en propiedades
-                        # (Opcional: si se usa polígono cubre casi todo, pero esto maneja la base)
-                        pass
 
-            # Mostrar cuántos puntos están seleccionados en total
             cant_sel = len(st.session_state['puntos_seleccionados'])
             st.info(f"📍 **{cant_sel} puntos seleccionados en total** (acumulados de figuras y clics).")
 
@@ -158,7 +160,6 @@ if uploaded_file is not None:
 
             st.divider()
 
-            # Opciones de los 12 vehículos de transporte
             lista_vehiculos = [f"TR-0{i}" if i < 10 else f"TR-{i}" for i in range(1, 13)]
             nuevo_transporte = st.selectbox("Asignar al código de transporte:", lista_vehiculos)
 
@@ -167,7 +168,6 @@ if uploaded_file is not None:
                     for pid in st.session_state['puntos_seleccionados']:
                         st.session_state['asignaciones'][pid] = nuevo_transporte
                     
-                    # Limpiar selección temporal y dejar el color fijo del nuevo transporte
                     st.session_state['puntos_seleccionados'] = set()
                     st.session_state['last_drawing_sig'] = None
                     st.success(f"¡Asignado exitosamente a {nuevo_transporte}!")
@@ -177,7 +177,6 @@ if uploaded_file is not None:
 
             st.divider()
             
-            # Estadísticas y exportación final
             df_resultado = df.copy()
             df_resultado['codigo_transporte_nuevo'] = df_resultado['id_pedido'].map(st.session_state['asignaciones'])
             
@@ -191,7 +190,6 @@ if uploaded_file is not None:
                 st.session_state['last_drawing_sig'] = None
                 st.rerun()
 
-            # Botón de descarga para SAP
             csv_data = df_resultado[['id_pedido', 'codigo_transporte_nuevo']].to_csv(index=False).encode('utf-8')
             st.download_button(
                 label="📥 Descargar CSV definitivo para SAP",
