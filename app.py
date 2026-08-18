@@ -44,15 +44,14 @@ if 'drawn_features' not in st.session_state: st.session_state['drawn_features'] 
 if 'map_center' not in st.session_state: st.session_state['map_center'] = [-33.45, -70.65]
 if 'map_zoom' not in st.session_state: st.session_state['map_zoom'] = 11
 
-# --- Carga de Archivos (Compatible con CSV y XLSX de SAP) ---
+# --- Carga de Archivos ---
 col_u1, col_u2 = st.columns(2)
 with col_u1: 
-    uploaded_file = st.file_uploader("📂 Sube archivo de pedidos (SAP XLSX o CSV)", type=["csv", "xlsx", "xls"])
+    uploaded_file = st.file_uploader("📂 Sube archivo de pedidos (XLSX o CSV)", type=["csv", "xlsx", "xls"])
 with col_u2: 
     uploaded_geo = st.file_uploader("📍 Sube GeoJSON de Zonas (Opcional)", type=["geojson"])
 
 if uploaded_file:
-    # Lectura automática según la extensión del archivo
     file_name = uploaded_file.name.lower()
     if file_name.endswith('.csv'):
         df = pd.read_csv(uploaded_file)
@@ -67,10 +66,9 @@ if uploaded_file:
     with col_mapa:
         modo_multi = st.checkbox("🟢 Activar Modo Selección Múltiple (para clics individuales)", value=False)
         
-        # Crear mapa manteniendo la posición actual
         m = folium.Map(location=st.session_state['map_center'], zoom_start=st.session_state['map_zoom'], tiles="CartoDB positron")
         
-        # 1. Dibujar Zonas (GeoJSON) si se cargaron
+        # 1. Dibujar Zonas (GeoJSON)
         if uploaded_geo:
             geo_data = json.load(uploaded_geo)
             folium.GeoJson(
@@ -104,11 +102,12 @@ if uploaded_file:
                 popup=folium.Popup(popup_html, min_width=200)
             ).add_to(m)
 
-        # 3. Redibujar geometrías de usuario previas
-        for feature in st.session_state['drawn_features']:
-            folium.GeoJson(feature).add_to(m)
+        # 3. Redibujar geometrías de usuario previas (Protegido contra None)
+        features_a_dibujar = st.session_state.get('drawn_features')
+        if features_a_dibujar:
+            for feature in features_a_dibujar:
+                folium.GeoJson(feature).add_to(m)
 
-        # Herramientas de dibujo traducidas al español
         Draw(
             draw_options={
                 'polygon': {'title': 'Dibujar un polígono'},
@@ -124,7 +123,6 @@ if uploaded_file:
             }
         ).add_to(m)
 
-        # Renderizar mapa
         map_output = st_folium(
             m, 
             width=750, 
@@ -133,7 +131,6 @@ if uploaded_file:
             returned_objects=["last_object_clicked", "all_drawings", "center", "zoom"]
         )
 
-        # Guardar posición y zoom actuales
         if map_output and 'center' in map_output and map_output['center']:
             st.session_state['map_center'] = [map_output['center']['lat'], map_output['center']['lng']]
         if map_output and 'zoom' in map_output and map_output['zoom']:
@@ -141,7 +138,6 @@ if uploaded_file:
 
         hubo_cambio = False
 
-        # Clics individuales
         if map_output and map_output.get('last_object_clicked'):
             click_obj = map_output['last_object_clicked']
             click_sig = str(click_obj)
@@ -159,9 +155,8 @@ if uploaded_file:
                             st.session_state['puntos_seleccionados'].add(str(pid))
                     hubo_cambio = True
 
-        # Procesar figuras geométricas
         if map_output and 'all_drawings' in map_output:
-            current_drawings = map_output['all_drawings']
+            current_drawings = map_output['all_drawings'] or []
             if current_drawings != st.session_state.get('drawn_features'):
                 st.session_state['drawn_features'] = current_drawings
                 
@@ -195,7 +190,6 @@ if uploaded_file:
         df_res = df.copy()
         df_res['codigo_transporte_nuevo'] = df_res['id_pedido'].astype(str).map(st.session_state['asignaciones'])
         
-        # --- EXPORTACIÓN XLSX PARA SAP / GOOGLE MAPS ---
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
             df_res[['id_pedido', 'lat', 'lon', 'cliente', 'codigo_transporte_nuevo', 'direccion']].to_excel(writer, index=False, sheet_name='Pedidos')
