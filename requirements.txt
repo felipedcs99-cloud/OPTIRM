@@ -1,6 +1,7 @@
-streamlit
-pandas
-folium
-streamlit-folium
-xlsxwriter
-openpyxl
+streamlit>=1.32
+streamlit-folium>=0.20
+folium>=0.16
+pandas>=2.0
+numpy>=1.24
+openpyxl>=3.1
+shapely>=2.0
