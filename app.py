@@ -6,10 +6,22 @@
 Aplicación Streamlit para planificación de despachos:
     - Carga de pedidos geolocalizados (.xlsx / .csv, formato SAP)
     - Visualización en mapa interactivo (Folium) con capas GeoJSON de comunas
-    - Selección de pedidos mediante herramientas de dibujo (polígono/rectángulo/círculo)
+    - Selección múltiple acumulable de pedidos (figuras dibujadas + clicks
+      individuales sobre los puntos) sin perder la posición/zoom del mapa
     - Asignación de pedidos a unidades de flota (camionetas / camiones)
     - Control de capacidad en tiempo real (kg) con alertas visuales
+    - Desglose y edición detallada de los pedidos por vehículo (quitar /
+      reasignar directamente desde el panel de control)
     - Exportación del plan de despacho a .xlsx compatible con SAP
+
+Notas de UX/arquitectura:
+    - El mapa se renderiza dentro de un `st.fragment`. Esto es clave para que
+      mover/hacer zoom en el mapa (o hacer click en un punto) NO dispare un
+      rerun de toda la aplicación: solo se vuelve a ejecutar el fragmento del
+      mapa, por lo que la vista (centro/zoom) nunca "salta" hacia atrás.
+    - Cuando una interacción en el mapa SÍ cambia datos que el panel derecho
+      necesita (una nueva selección), se fuerza explícitamente un rerun de
+      toda la app (`scope="app"`) para sincronizar ambos paneles.
 
 Autor: Desarrollo interno - Logística RM Zona Sur
 ==============================================================================
@@ -60,6 +72,21 @@ CENTRO_DEFECTO = [-33.5975, -70.5789]  # aprox. Puente Alto / La Florida
 ZOOM_DEFECTO = 11
 
 
+def rerun_app():
+    """
+    Fuerza un rerun de TODA la aplicación (no solo del fragmento del mapa).
+    Se usa únicamente cuando cambia información que el panel derecho debe
+    reflejar (nueva selección, asignación, etc.). Los simples pan/zoom del
+    mapa NUNCA llaman a esta función.
+    """
+    try:
+        st.rerun(scope="app")
+    except TypeError:
+        # Compatibilidad con versiones de Streamlit anteriores a la
+        # incorporación del parámetro `scope`.
+        st.rerun()
+
+
 # ==============================================================================
 # 2. INICIALIZACIÓN DE session_state
 # ==============================================================================
@@ -78,6 +105,9 @@ def inicializar_estado():
         st.session_state.asignaciones = {}
 
     # --- Estado del mapa: centro, zoom y geometrías dibujadas ---
+    # Estos valores solo se usan para el render INICIAL del fragmento del
+    # mapa; una vez montado, el propio fragmento los mantiene sincronizados
+    # sin provocar reruns de la app completa.
     if "mapa_center" not in st.session_state:
         st.session_state.mapa_center = CENTRO_DEFECTO
     if "mapa_zoom" not in st.session_state:
@@ -85,9 +115,13 @@ def inicializar_estado():
     if "geometrias_dibujadas" not in st.session_state:
         st.session_state.geometrias_dibujadas = []  # lista de features GeoJSON
 
-    # --- Pedidos actualmente seleccionados (por dibujo o por tabla) ---
+    # --- Selección múltiple acumulable de pedidos (por figuras y/o clicks) ---
     if "pedidos_seleccionados" not in st.session_state:
         st.session_state.pedidos_seleccionados = []
+    if "modo_seleccion" not in st.session_state:
+        st.session_state.modo_seleccion = "Agregar a la selección"
+    if "ultimo_click_procesado" not in st.session_state:
+        st.session_state.ultimo_click_procesado = None
 
     # --- Vehículo activo elegido en el panel derecho ---
     if "vehiculo_activo_tipo" not in st.session_state:
@@ -291,7 +325,7 @@ def generar_excel_exportacion():
 
 
 # ==============================================================================
-# 6. CONSTRUCCIÓN DEL MAPA (FOLIUM)
+# 6. FUNCIONES AUXILIARES DEL MAPA
 # ==============================================================================
 
 def construir_mapa():
@@ -306,6 +340,12 @@ def construir_mapa():
 
     # --- Capa GeoJSON de comunas (si fue cargada) ---
     if st.session_state.geojson_comunas is not None:
+        primeras_props = (
+            st.session_state.geojson_comunas.get("features", [{}])[0].get("properties", {})
+            or {}
+        )
+        campos_tooltip = list(primeras_props.keys())[:1] if primeras_props else None
+
         folium.GeoJson(
             st.session_state.geojson_comunas,
             name="Comunas - Zona Sur RM",
@@ -315,12 +355,7 @@ def construir_mapa():
                 "weight": 1.5,
                 "fillOpacity": 0.08,
             },
-            tooltip=folium.GeoJsonTooltip(
-                fields=list(
-                    (st.session_state.geojson_comunas.get("features", [{}])[0]
-                     .get("properties", {}) or {"nombre": ""}).keys()
-                )[:1]
-            ) if st.session_state.geojson_comunas.get("features") else None,
+            tooltip=folium.GeoJsonTooltip(fields=campos_tooltip) if campos_tooltip else None,
         ).add_to(m)
 
     # --- Herramienta de dibujo: polígono, rectángulo, círculo ---
@@ -339,6 +374,10 @@ def construir_mapa():
     ).add_to(m)
 
     # --- Marcadores de pedidos ---
+    # IMPORTANTE: el `tooltip` de cada marcador es EXACTAMENTE el id_pedido
+    # (sin texto adicional). Esto permite que, al hacer click sobre un punto,
+    # `st_folium` devuelva ese texto en `last_object_clicked_tooltip` y
+    # podamos identificar sin ambigüedad qué pedido fue clickeado.
     df = st.session_state.df_pedidos
     asignaciones = st.session_state.asignaciones
     seleccionados = set(st.session_state.pedidos_seleccionados)
@@ -363,19 +402,20 @@ def construir_mapa():
             f"<b>Dirección:</b> {fila['direccion']}<br>"
             f"<b>Peso:</b> {fila['peso_kg']} kg<br>"
             f"<b>Cód. Transporte SAP:</b> {fila['codigo_transporte_sap']}<br>"
-            f"<b>Unidad asignada:</b> {asignaciones.get(pid, 'Sin asignar')}"
+            f"<b>Unidad asignada:</b> {asignaciones.get(pid, 'Sin asignar')}<br>"
+            f"<i>Click sobre el punto para sumarlo/quitarlo de la selección.</i>"
         )
 
         folium.CircleMarker(
             location=[fila["lat"], fila["lon"]],
-            radius=7 if es_seleccionado else 5,
+            radius=8 if es_seleccionado else 6,
             color=color,
             fill=True,
             fill_color=color,
             fill_opacity=0.9,
             weight=2,
             popup=folium.Popup(popup_html, max_width=280),
-            tooltip=f"{pid} · {fila['peso_kg']} kg",
+            tooltip=pid,
         ).add_to(capa_pedidos)
 
     capa_pedidos.add_to(m)
@@ -399,11 +439,11 @@ def construir_mapa():
     return m
 
 
-def procesar_pedidos_dentro_de_geometrias(geometrias):
+def obtener_ids_dentro_de_geometrias(geometrias):
     """
     Dado un listado de features GeoJSON dibujadas por el usuario,
-    retorna la lista de id_pedido cuyos puntos caen dentro de al
-    menos una de esas geometrías.
+    retorna la lista de id_pedido cuyos puntos caen dentro de AL MENOS
+    una de esas geometrías (unión de todas las figuras dibujadas).
     """
     df = st.session_state.df_pedidos
     if df.empty or not geometrias:
@@ -423,8 +463,133 @@ def procesar_pedidos_dentro_de_geometrias(geometrias):
     return list(ids_dentro)
 
 
+def aplicar_seleccion_por_dibujos(dibujos_actuales):
+    """
+    Actualiza `pedidos_seleccionados` a partir de las figuras dibujadas,
+    respetando el modo elegido por el usuario:
+        - "Agregar a la selección": UNE los pedidos de las figuras con lo
+          que ya estaba seleccionado (permite combinar varias figuras y/o
+          puntos sueltos antes de asignarlos a un transporte).
+        - "Reemplazar selección": descarta la selección anterior y deja
+          solo los pedidos contenidos en las figuras actuales.
+    """
+    ids_en_figuras = set(obtener_ids_dentro_de_geometrias(dibujos_actuales))
+    seleccion_actual = set(st.session_state.pedidos_seleccionados)
+
+    if st.session_state.modo_seleccion.startswith("Agregar"):
+        nueva_seleccion = seleccion_actual | ids_en_figuras
+    else:
+        nueva_seleccion = ids_en_figuras
+
+    st.session_state.pedidos_seleccionados = sorted(nueva_seleccion)
+
+
+def alternar_seleccion_pedido(id_pedido):
+    """Agrega o quita UN pedido puntual de la selección (click sobre un punto)."""
+    seleccion_actual = set(st.session_state.pedidos_seleccionados)
+    if id_pedido in seleccion_actual:
+        seleccion_actual.discard(id_pedido)
+    else:
+        seleccion_actual.add(id_pedido)
+    st.session_state.pedidos_seleccionados = sorted(seleccion_actual)
+
+
 # ==============================================================================
-# 7. BARRA LATERAL: CARGA DE ARCHIVOS
+# 7. FRAGMENTO DEL MAPA
+# ==============================================================================
+# Se aísla en un `st.fragment` para que mover/hacer zoom/hacer click en el
+# mapa NO dispare un rerun de toda la app: solo este bloque se vuelve a
+# ejecutar, por lo que la vista del mapa (centro/zoom) se mantiene estable
+# sin importar cuántas veces el usuario interactúe con él.
+
+@st.fragment
+def fragmento_mapa():
+    st.subheader("🗺️ Mapa de Pedidos")
+
+    col_modo, col_info = st.columns([1.3, 1])
+    with col_modo:
+        st.radio(
+            "Modo de selección al dibujar una figura",
+            options=["Agregar a la selección", "Reemplazar selección"],
+            key="modo_seleccion",
+            horizontal=True,
+            help=(
+                "'Agregar' te permite dibujar varias figuras (o hacer click en "
+                "puntos sueltos) y combinarlas todas antes de asignarlas a un "
+                "mismo transporte. 'Reemplazar' deja solo lo último dibujado."
+            ),
+        )
+    with col_info:
+        st.metric("Pedidos seleccionados", len(st.session_state.pedidos_seleccionados))
+
+    mapa = construir_mapa()
+
+    salida_mapa = st_folium(
+        mapa,
+        width="100%",
+        height=620,
+        key="mapa_principal",
+        returned_objects=[
+            "last_active_drawing",
+            "all_drawings",
+            "center",
+            "zoom",
+            "last_object_clicked_tooltip",
+        ],
+    )
+
+    # --- Persistencia de centro y zoom del mapa (sin forzar rerun) ---
+    # Como esto ocurre DENTRO del fragmento, actualizar estos valores no
+    # provoca que el resto de la app (sidebar, panel derecho) se vuelva a
+    # ejecutar, así que el usuario puede paniar/hacer zoom todas las veces
+    # que quiera sin ver la vista "saltar" a una posición anterior.
+    if salida_mapa.get("center"):
+        st.session_state.mapa_center = [
+            salida_mapa["center"]["lat"],
+            salida_mapa["center"]["lng"],
+        ]
+    if salida_mapa.get("zoom"):
+        st.session_state.mapa_zoom = salida_mapa["zoom"]
+
+    # --- Selección por figuras dibujadas (polígono/rectángulo/círculo) ---
+    dibujos_actuales = salida_mapa.get("all_drawings") or []
+    if dibujos_actuales and dibujos_actuales != st.session_state.geometrias_dibujadas:
+        st.session_state.geometrias_dibujadas = dibujos_actuales
+        aplicar_seleccion_por_dibujos(dibujos_actuales)
+        rerun_app()  # cambió la selección: se sincroniza con el panel derecho
+
+    # --- Selección por click individual sobre un punto ---
+    tooltip_clickeado = salida_mapa.get("last_object_clicked_tooltip")
+    if tooltip_clickeado and tooltip_clickeado != st.session_state.ultimo_click_procesado:
+        st.session_state.ultimo_click_procesado = tooltip_clickeado
+        # El tooltip de cada marcador es exactamente su id_pedido.
+        ids_validos = set(st.session_state.df_pedidos["id_pedido"])
+        if tooltip_clickeado in ids_validos:
+            alternar_seleccion_pedido(tooltip_clickeado)
+            rerun_app()  # cambió la selección: se sincroniza con el panel derecho
+
+    col_btn_1, col_btn_2 = st.columns(2)
+    with col_btn_1:
+        if st.button("🧹 Limpiar selección y figuras", use_container_width=True):
+            st.session_state.pedidos_seleccionados = []
+            st.session_state.geometrias_dibujadas = []
+            st.session_state.ultimo_click_procesado = None
+            rerun_app()
+    with col_btn_2:
+        st.caption(
+            "🖱️ Click en un punto para sumarlo o quitarlo de la selección, "
+            "una figura a la vez."
+        )
+
+    st.caption(
+        "🟡 Seleccionado ahora · 🟢 Ya asignado a flota · ⚪ Sin asignar. "
+        "Puedes combinar varias figuras dibujadas y clicks individuales "
+        "antes de asignar todo junto a un transporte (modo 'Agregar')."
+    )
+
+
+# ==============================================================================
+# 8. BARRA LATERAL: CARGA DE ARCHIVOS
 # ==============================================================================
 
 st.sidebar.title("🚚 Panel de Control")
@@ -446,6 +611,7 @@ with st.sidebar.expander("📂 Carga de datos", expanded=st.session_state.df_ped
                 st.session_state.df_pedidos = df_nuevo
                 st.session_state.asignaciones = {}
                 st.session_state.pedidos_seleccionados = []
+                st.session_state.geometrias_dibujadas = []
                 st.session_state.ultimo_error_carga = None
                 # Recentrar el mapa en el promedio de los pedidos cargados
                 st.session_state.mapa_center = [
@@ -459,6 +625,7 @@ with st.sidebar.expander("📂 Carga de datos", expanded=st.session_state.df_ped
             st.session_state.df_pedidos = pd.DataFrame(columns=COLUMNAS_REQUERIDAS)
             st.session_state.asignaciones = {}
             st.session_state.pedidos_seleccionados = []
+            st.session_state.geometrias_dibujadas = []
             st.session_state.ultimo_error_carga = None
             st.rerun()
 
@@ -489,7 +656,7 @@ if not st.session_state.df_pedidos.empty:
 
 
 # ==============================================================================
-# 8. BARRA LATERAL: PANEL DE CONTROL DE CAPACIDAD DE FLOTA
+# 9. BARRA LATERAL: PANEL DE CONTROL DE CAPACIDAD DE FLOTA
 # ==============================================================================
 
 st.sidebar.subheader("📦 Panel de Control de Capacidad")
@@ -524,9 +691,11 @@ for tipo, cfg in FLOTA_CONFIG.items():
                 elif fila["porcentaje_uso"] >= 90:
                     st.info(f"🟡 {fila['unidad']} está cerca del límite de capacidad.")
 
+    st.sidebar.caption("👉 Detalle editable (quitar / mover pedidos) en el panel derecho.")
+
 
 # ==============================================================================
-# 9. BARRA LATERAL: EXPORTACIÓN
+# 10. BARRA LATERAL: EXPORTACIÓN
 # ==============================================================================
 
 st.sidebar.subheader("📤 Exportación")
@@ -545,7 +714,7 @@ else:
 
 
 # ==============================================================================
-# 10. CUERPO PRINCIPAL: LAYOUT EN DOS COLUMNAS
+# 11. CUERPO PRINCIPAL: LAYOUT EN DOS COLUMNAS
 # ==============================================================================
 
 st.title("Optimización Logística — Región Metropolitana (Zona Sur)")
@@ -560,61 +729,13 @@ if st.session_state.df_pedidos.empty:
 col_mapa, col_panel = st.columns([2.2, 1])
 
 # ------------------------------------------------------------------------
-# COLUMNA IZQUIERDA: MAPA INTERACTIVO
+# COLUMNA IZQUIERDA: MAPA INTERACTIVO (fragmento aislado, ver sección 7)
 # ------------------------------------------------------------------------
 with col_mapa:
-    st.subheader("🗺️ Mapa de Pedidos")
-
-    mapa = construir_mapa()
-
-    salida_mapa = st_folium(
-        mapa,
-        width="100%",
-        height=620,
-        key="mapa_principal",
-        returned_objects=["last_active_drawing", "all_drawings", "center", "zoom"],
-    )
-
-    # --- Persistencia de centro y zoom del mapa ---
-    if salida_mapa.get("center"):
-        st.session_state.mapa_center = [
-            salida_mapa["center"]["lat"],
-            salida_mapa["center"]["lng"],
-        ]
-    if salida_mapa.get("zoom"):
-        st.session_state.mapa_zoom = salida_mapa["zoom"]
-
-    # --- Persistencia de geometrías dibujadas ---
-    dibujos_actuales = salida_mapa.get("all_drawings") or []
-    if dibujos_actuales and dibujos_actuales != st.session_state.geometrias_dibujadas:
-        st.session_state.geometrias_dibujadas = dibujos_actuales
-        # Al detectar un nuevo set de geometrías, se recalculan los pedidos
-        # que caen dentro de ellas y se marcan como seleccionados.
-        ids_dentro = procesar_pedidos_dentro_de_geometrias(dibujos_actuales)
-        if ids_dentro:
-            st.session_state.pedidos_seleccionados = ids_dentro
-            st.rerun()
-
-    col_btn_1, col_btn_2 = st.columns(2)
-    with col_btn_1:
-        if st.button("🧹 Limpiar selección", use_container_width=True):
-            st.session_state.pedidos_seleccionados = []
-            st.session_state.geometrias_dibujadas = []
-            st.rerun()
-    with col_btn_2:
-        st.caption(
-            f"Pedidos seleccionados: **{len(st.session_state.pedidos_seleccionados)}**"
-        )
-
-    st.caption(
-        "🟡 Seleccionado ahora · 🟢 Ya asignado a flota · ⚪ Sin asignar. "
-        "Usa las herramientas de dibujo (esquina superior izquierda del mapa) "
-        "para seleccionar grupos de pedidos por zona."
-    )
-
+    fragmento_mapa()
 
 # ------------------------------------------------------------------------
-# COLUMNA DERECHA: PANEL DE ASIGNACIÓN
+# COLUMNA DERECHA: PANEL DE ASIGNACIÓN Y DETALLE POR VEHÍCULO
 # ------------------------------------------------------------------------
 with col_panel:
     st.subheader("📋 Resumen de Flota")
@@ -635,27 +756,30 @@ with col_panel:
             )
 
     st.divider()
-    st.subheader("🚐 Asignar pedidos a vehículo")
+    st.subheader("🚐 Asignar selección a un vehículo")
 
     if st.session_state.df_pedidos.empty:
         st.caption("No hay pedidos cargados todavía.")
     else:
-        tabla_seleccion = st.session_state.df_pedidos[
-            st.session_state.df_pedidos["id_pedido"].isin(
-                st.session_state.pedidos_seleccionados
-            )
-        ] if st.session_state.pedidos_seleccionados else st.session_state.df_pedidos
-
         ids_para_asignar = st.multiselect(
             "Pedidos a asignar",
             options=st.session_state.df_pedidos["id_pedido"].tolist(),
-            default=st.session_state.pedidos_seleccionados,
-            help="Se precargan los pedidos seleccionados en el mapa. Puedes ajustar la lista manualmente.",
+            default=[
+                pid for pid in st.session_state.pedidos_seleccionados
+                if pid in set(st.session_state.df_pedidos["id_pedido"])
+            ],
+            help=(
+                "Se precargan los pedidos seleccionados en el mapa (figuras + "
+                "clicks individuales). También puedes ajustar la lista aquí "
+                "manualmente; los cambios quedan sincronizados con el mapa."
+            ),
+            key="multiselect_pedidos",
         )
 
-        peso_seleccion = st.session_state.df_pedidos[
-            st.session_state.df_pedidos["id_pedido"].isin(ids_para_asignar)
-        ]["peso_kg"].sum()
+        # Sincroniza cualquier ajuste manual del multiselect de vuelta hacia
+        # la selección del mapa, para que ambos paneles queden consistentes.
+        if set(ids_para_asignar) != set(st.session_state.pedidos_seleccionados):
+            st.session_state.pedidos_seleccionados = ids_para_asignar
 
         col_tipo, col_num = st.columns(2)
         with col_tipo:
@@ -715,6 +839,7 @@ with col_panel:
                 asignar_pedidos_a_vehiculo(ids_para_asignar, unidad_activa)
                 st.session_state.pedidos_seleccionados = []
                 st.session_state.geometrias_dibujadas = []
+                st.session_state.ultimo_click_procesado = None
                 st.rerun()
         with col_asig_2:
             if st.button(
@@ -726,7 +851,78 @@ with col_panel:
                 st.rerun()
 
     st.divider()
-    st.subheader("📑 Detalle de pedidos")
+    st.subheader("🚛 Desglose y edición por vehículo")
+
+    unidades_en_uso = (
+        df_capacidad[df_capacidad["n_pedidos"] > 0]["unidad"].tolist()
+        if not df_capacidad.empty else []
+    )
+
+    if not unidades_en_uso:
+        st.caption("Aún no hay vehículos con pedidos asignados.")
+    else:
+        unidad_detalle = st.selectbox(
+            "Selecciona un vehículo para ver su detalle",
+            options=unidades_en_uso,
+            key="unidad_detalle_selector",
+        )
+
+        ids_unidad = [
+            pid for pid, u in st.session_state.asignaciones.items() if u == unidad_detalle
+        ]
+        df_unidad = st.session_state.df_pedidos[
+            st.session_state.df_pedidos["id_pedido"].isin(ids_unidad)
+        ].copy()
+
+        capacidad_unidad = obtener_capacidad_unidad(unidad_detalle)
+        peso_unidad = df_unidad["peso_kg"].sum()
+        st.caption(
+            f"**{unidad_detalle}** · {peso_unidad:,.1f} / {capacidad_unidad:,.0f} kg "
+            f"· {len(df_unidad)} pedidos".replace(",", ".")
+        )
+
+        opciones_mover = ["(mantener)"] + [
+            u for u in listar_unidades_flota() if u != unidad_detalle
+        ]
+        df_unidad["quitar"] = False
+        df_unidad["mover_a"] = "(mantener)"
+
+        editor_key = f"editor_{unidad_detalle}"
+        df_editado = st.data_editor(
+            df_unidad[["id_pedido", "cliente", "peso_kg", "direccion", "quitar", "mover_a"]],
+            column_config={
+                "id_pedido": st.column_config.TextColumn("Pedido", disabled=True),
+                "cliente": st.column_config.TextColumn("Cliente", disabled=True),
+                "peso_kg": st.column_config.NumberColumn("Peso (kg)", disabled=True),
+                "direccion": st.column_config.TextColumn("Dirección", disabled=True),
+                "quitar": st.column_config.CheckboxColumn(
+                    "Quitar", help="Deja el pedido sin asignar"
+                ),
+                "mover_a": st.column_config.SelectboxColumn(
+                    "Mover a", options=opciones_mover, help="Reasigna el pedido a otra unidad"
+                ),
+            },
+            hide_index=True,
+            use_container_width=True,
+            key=editor_key,
+        )
+
+        if st.button("💾 Aplicar cambios de este vehículo", key=f"aplicar_{unidad_detalle}"):
+            movimientos = 0
+            for _, fila in df_editado.iterrows():
+                pid = fila["id_pedido"]
+                if fila["quitar"]:
+                    liberar_pedidos([pid])
+                    movimientos += 1
+                elif fila["mover_a"] != "(mantener)":
+                    asignar_pedidos_a_vehiculo([pid], fila["mover_a"])
+                    movimientos += 1
+            if movimientos:
+                st.success(f"Se actualizaron {movimientos} pedido(s).")
+            st.rerun()
+
+    st.divider()
+    st.subheader("📑 Todos los pedidos")
 
     if not st.session_state.df_pedidos.empty:
         df_detalle = st.session_state.df_pedidos.copy()
@@ -739,7 +935,7 @@ with col_panel:
                 ["id_pedido", "cliente", "peso_kg", "codigo_transporte_sap", "unidad_asignada"]
             ],
             use_container_width=True,
-            height=280,
+            height=260,
             hide_index=True,
         )
     else:
