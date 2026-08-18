@@ -1,5 +1,4 @@
-streamlist
+streamlit
 pandas
 folium
 streamlit-folium
-shapely
