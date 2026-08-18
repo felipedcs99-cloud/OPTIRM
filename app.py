@@ -28,9 +28,18 @@ def punto_en_poligono(lon, lat, poly_coords):
         p1x, p1y = p2x, p2y
     return inside
 
+def distancia_haversine(lat1, lon1, lat2, lon2):
+    R = 6371000
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi, dlambda = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
+    a = math.sin(dphi/2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda/2)**2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return R * c
+
 # --- Estado Inicial ---
 if 'asignaciones' not in st.session_state: st.session_state['asignaciones'] = {}
 if 'puntos_seleccionados' not in st.session_state: st.session_state['puntos_seleccionados'] = set()
+if 'last_drawing_sig' not in st.session_state: st.session_state['last_drawing_sig'] = None
 
 # --- Carga de Archivo ---
 uploaded_file = st.file_uploader("📂 Sube tu archivo CSV de pedidos", type="csv")
@@ -43,15 +52,15 @@ if uploaded_file:
     col_mapa, col_panel = st.columns([2, 1])
 
     with col_mapa:
-        modo_multi = st.checkbox("🟢 Activar Modo Selección Múltiple (clic para sumar puntos)", value=False)
+        modo_multi = st.checkbox("🟢 Activar Modo Selección Múltiple por Clic (permite sumar/restar puntos individuales)", value=False)
         
         # Crear mapa con ubicación estable
         m = folium.Map(location=[-33.45, -70.65], zoom_start=11, tiles="CartoDB positron")
         
         for _, row in df.iterrows():
-            pid = row['id_pedido']
+            pid = str(row['id_pedido'])
             transporte = st.session_state['asignaciones'].get(pid, row['codigo_transporte_sap'])
-            is_sel = str(pid) in st.session_state['puntos_seleccionados']
+            is_sel = pid in st.session_state['puntos_seleccionados']
             
             # Popup en español
             popup_html = f"""
@@ -81,18 +90,49 @@ if uploaded_file:
         # Lógica de interacciones
         hubo_cambio = False
         
-        if map_output.get('last_object_clicked'):
-            tooltip = map_output['last_object_clicked']['tooltip']
-            pid = tooltip.split(" | ")[0].replace("ID: ", "").strip()
-            
-            if not modo_multi: 
-                st.session_state['puntos_seleccionados'] = {str(pid)}
-            else:
-                if str(pid) in st.session_state['puntos_seleccionados']: 
-                    st.session_state['puntos_seleccionados'].remove(str(pid))
-                else: 
-                    st.session_state['puntos_seleccionados'].add(str(pid))
-            hubo_cambio = True
+        if map_output:
+            # 1. Clic individual en un marcador
+            if map_output.get('last_object_clicked'):
+                tooltip = map_output['last_object_clicked'].get('tooltip', '')
+                if "ID: " in tooltip:
+                    pid = str(tooltip.split(" | ")[0].replace("ID: ", "").strip())
+                    if not modo_multi: 
+                        st.session_state['puntos_seleccionados'] = {pid}
+                    else:
+                        if pid in st.session_state['puntos_seleccionados']: 
+                            st.session_state['puntos_seleccionados'].remove(pid)
+                        else: 
+                            st.session_state['puntos_seleccionados'].add(pid)
+                    hubo_cambio = True
+
+            # 2. Figuras geométricas dibujadas (Polígonos, Rectángulos, Círculos - Acumulativas)
+            if map_output.get('last_active_drawing'):
+                drawing = map_output['last_active_drawing']
+                drawing_str = str(drawing)
+                
+                if drawing_str != st.session_state['last_drawing_sig']:
+                    st.session_state['last_drawing_sig'] = drawing_str
+                    geom_type = drawing['geometry']['type']
+                    coords = drawing['geometry']['coordinates']
+                    props = drawing.get('properties', {})
+
+                    # Polígono o Rectángulo
+                    if geom_type == 'Polygon':
+                        poly_coords = coords[0]
+                        for _, row in df.iterrows():
+                            if punto_en_poligono(row['lon'], row['lat'], poly_coords):
+                                st.session_state['puntos_seleccionados'].add(str(row['id_pedido']))
+                        hubo_cambio = True
+                    
+                    # Círculo
+                    elif geom_type == 'Point' and 'radius' in props:
+                        center_lon, center_lat = coords
+                        radius_m = props['radius']
+                        for _, row in df.iterrows():
+                            dist = distancia_haversine(row['lat'], row['lon'], center_lat, center_lon)
+                            if dist <= radius_m:
+                                st.session_state['puntos_seleccionados'].add(str(row['id_pedido']))
+                        hubo_cambio = True
 
         if hubo_cambio:
             st.rerun()
@@ -118,16 +158,24 @@ if uploaded_file:
         
         if st.button("🗑️ Limpiar selección"):
             st.session_state['puntos_seleccionados'] = set()
+            st.session_state['last_drawing_sig'] = None
             st.rerun()
 
         st.divider()
         nuevo = st.selectbox("Asignar seleccionados a:", [f"TR-{str(i).zfill(2)}" for i in range(1, 13)])
         if st.button("✅ Aplicar transporte a selección"):
-            for pid in st.session_state['puntos_seleccionados']:
-                st.session_state['asignaciones'][str(pid)] = nuevo
-            st.success("¡Asignación realizada!")
-            st.rerun()
+            if len(st.session_state['puntos_seleccionados']) > 0:
+                for pid in st.session_state['puntos_seleccionados']:
+                    st.session_state['asignaciones'][str(pid)] = nuevo
+                st.success("¡Asignación realizada exitosamente!")
+                st.session_state['puntos_seleccionados'] = set()
+                st.session_state['last_drawing_sig'] = None
+                st.rerun()
+            else:
+                st.warning("No hay puntos seleccionados para asignar.")
 
         if st.button("🔄 Restablecer datos originales"):
             st.session_state['asignaciones'] = {}
+            st.session_state['puntos_seleccionados'] = set()
+            st.session_state['last_drawing_sig'] = None
             st.rerun()
