@@ -1,0 +1,5 @@
+streamlist
+pandas
+folium
+streamlit-folium
+shapely
