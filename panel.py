@@ -15,14 +15,9 @@ from utils import (
 )
 from datetime import datetime
 
-# ============================================================================
-# BARRA LATERAL
-# ============================================================================
-
 def barra_lateral():
     st.sidebar.title("🚚 Panel de Control")
 
-    # ---- CARGA DE DATOS ----
     with st.sidebar.expander("📂 Carga de datos", expanded=st.session_state.df_pedidos.empty):
         archivo_pedidos = st.file_uploader(
             "Archivo de pedidos (.xlsx / .csv)",
@@ -81,11 +76,9 @@ def barra_lateral():
             f"{len(st.session_state.asignaciones)} asignados"
         )
 
-    # ---- PANEL DE CAPACIDAD DE FLOTA ----
     st.sidebar.subheader("📦 Capacidad de Flota")
     df_capacidad = calcular_carga_por_unidad()
 
-    # Filtro por tipo de vehículo
     tipo_filtro = st.sidebar.selectbox("Tipo de flota", list(FLOTA_CONFIG.keys()))
     unidades_filtradas = df_capacidad[df_capacidad["tipo"] == tipo_filtro]
 
@@ -103,7 +96,6 @@ def barra_lateral():
 
     st.sidebar.caption("👉 Detalle editable en el panel derecho.")
 
-    # ---- EXPORTACIÓN ----
     st.sidebar.subheader("📤 Exportación")
     if not st.session_state.df_pedidos.empty:
         excel_bytes = generar_excel_exportacion()
@@ -114,10 +106,6 @@ def barra_lateral():
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
-
-# ============================================================================
-# PANEL DE CONTROL DERECHO
-# ============================================================================
 
 def panel_control():
     st.subheader("📋 Resumen de Flota")
@@ -153,12 +141,8 @@ def panel_control():
         key="multiselect_pedidos",
     )
 
-    # Sincronizar selección desde el multiselect hacia el mapa
     if set(ids_para_asignar) != set(st.session_state.pedidos_seleccionados):
         st.session_state.pedidos_seleccionados = ids_para_asignar
-        # También actualizamos los conjuntos de clics/figuras? No es necesario porque el multiselect es el origen final.
-        # Pero para mantener consistencia, podríamos resetear las selecciones por figuras/clics.
-        # Lo dejamos así: el multiselect tiene la última palabra.
 
     col_tipo, col_num = st.columns(2)
     with col_tipo:
@@ -179,13 +163,11 @@ def panel_control():
     unidad_activa = f"{tipo_vehiculo}-{int(numero_vehiculo):02d}"
     capacidad_activa = FLOTA_CONFIG[tipo_vehiculo]["capacidad_kg"]
 
-    # Peso ya asignado a esa unidad
     ids_ya_asignados = [pid for pid, u in st.session_state.asignaciones.items() if u == unidad_activa]
     peso_ya_asignado = st.session_state.df_pedidos[
         st.session_state.df_pedidos["id_pedido"].isin(ids_ya_asignados)
     ]["peso_kg"].sum()
 
-    # Peso de los nuevos a asignar (los que están en el multiselect y no están ya en la unidad)
     ids_nuevos = [pid for pid in ids_para_asignar if pid not in ids_ya_asignados]
     peso_nuevo = st.session_state.df_pedidos[
         st.session_state.df_pedidos["id_pedido"].isin(ids_nuevos)
@@ -213,7 +195,6 @@ def panel_control():
             type="primary",
         ):
             asignar_pedidos_a_vehiculo(ids_para_asignar, unidad_activa)
-            # Limpiar selección después de asignar
             limpiar_seleccion_y_figuras()
             st.rerun()
     with col_asig_2:
@@ -238,7 +219,6 @@ def panel_control():
             key="unidad_detalle_selector",
         )
 
-        # Cargar o actualizar el DataFrame del editor
         ids_unidad = [pid for pid, u in st.session_state.asignaciones.items() if u == unidad_detalle]
         df_temp = st.session_state.df_pedidos[
             st.session_state.df_pedidos["id_pedido"].isin(ids_unidad)
@@ -246,7 +226,6 @@ def panel_control():
         df_temp["quitar"] = False
         df_temp["mover_a"] = "(mantener)"
 
-        # Si el DataFrame del editor no corresponde a esta unidad, lo actualizamos
         if st.session_state.df_editor_actual.empty or unidad_detalle not in st.session_state.df_editor_actual["id_pedido"].values:
             st.session_state.df_editor_actual = df_temp
 
@@ -261,7 +240,6 @@ def panel_control():
             u for u in listar_unidades_flota() if u != unidad_detalle
         ]
 
-        # Editor de datos
         df_editado = st.data_editor(
             st.session_state.df_editor_actual[
                 ["id_pedido", "cliente", "peso_kg", "direccion", "quitar", "mover_a"]
@@ -293,7 +271,6 @@ def panel_control():
                     movimientos += 1
             if movimientos:
                 st.success(f"Se actualizaron {movimientos} pedido(s).")
-                # Actualizar el DataFrame del editor
                 st.session_state.df_editor_actual = df_editado
             st.rerun()
 
