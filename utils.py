@@ -8,10 +8,6 @@ import pandas as pd
 import streamlit as st
 from shapely.geometry import shape, Point
 
-# ============================================================================
-# CONSTANTES Y CONFIGURACIÓN
-# ============================================================================
-
 COLUMNAS_REQUERIDAS = [
     "id_pedido",
     "cliente",
@@ -30,12 +26,7 @@ FLOTA_CONFIG = {
 CENTRO_DEFECTO = [-33.5975, -70.5789]
 ZOOM_DEFECTO = 11
 
-# ============================================================================
-# INICIALIZACIÓN DEL ESTADO
-# ============================================================================
-
 def inicializar_estado():
-    """Crea todas las claves de session_state con valores por defecto."""
     defaults = {
         "df_pedidos": pd.DataFrame(columns=COLUMNAS_REQUERIDAS),
         "asignaciones": {},
@@ -58,14 +49,9 @@ def inicializar_estado():
         if key not in st.session_state:
             st.session_state[key] = value
 
-# ============================================================================
-# CARGA Y VALIDACIÓN DE ARCHIVOS
-# ============================================================================
-
 def leer_archivo_pedidos(archivo_subido):
     if archivo_subido is None:
         return None, "No se seleccionó ningún archivo."
-
     nombre = archivo_subido.name.lower()
     try:
         if nombre.endswith((".xlsx", ".xls")):
@@ -105,12 +91,8 @@ def leer_archivo_pedidos(archivo_subido):
 def cargar_geojson(contenido_bytes):
     try:
         return json.loads(contenido_bytes)
-    except Exception as e:
+    except Exception:
         return None
-
-# ============================================================================
-# LÓGICA DE FLOTA Y CAPACIDAD
-# ============================================================================
 
 def listar_unidades_flota():
     unidades = []
@@ -150,10 +132,6 @@ def liberar_pedidos(ids_pedidos):
     for pid in ids_pedidos:
         st.session_state.asignaciones.pop(pid, None)
 
-# ============================================================================
-# EXPORTACIÓN
-# ============================================================================
-
 def generar_excel_exportacion():
     df = st.session_state.df_pedidos.copy()
     df["unidad_asignada"] = df["id_pedido"].map(st.session_state.asignaciones).fillna("SIN ASIGNAR")
@@ -166,10 +144,6 @@ def generar_excel_exportacion():
         resumen.to_excel(writer, sheet_name="Resumen_Flota", index=False)
     buffer.seek(0)
     return buffer
-
-# ============================================================================
-# SELECCIÓN POR GEOMETRÍAS
-# ============================================================================
 
 def obtener_ids_dentro_de_geometrias(geometrias):
     df = st.session_state.df_pedidos
@@ -188,19 +162,16 @@ def obtener_ids_dentro_de_geometrias(geometrias):
     return list(ids_dentro)
 
 def actualizar_seleccion_por_figuras(dibujos_actuales):
-    """Actualiza la selección basada en figuras, respetando el modo."""
     ids_figuras = set(obtener_ids_dentro_de_geometrias(dibujos_actuales))
     if st.session_state.modo_seleccion.startswith("Agregar"):
         st.session_state.seleccion_por_figuras |= ids_figuras
     else:
         st.session_state.seleccion_por_figuras = ids_figuras
-    # Recalcular la selección total
     st.session_state.pedidos_seleccionados = sorted(
         st.session_state.seleccion_por_clics | st.session_state.seleccion_por_figuras
     )
 
 def alternar_seleccion_pedido(id_pedido):
-    """Alterna la selección por clic individual."""
     if id_pedido in st.session_state.seleccion_por_clics:
         st.session_state.seleccion_por_clics.discard(id_pedido)
     else:
